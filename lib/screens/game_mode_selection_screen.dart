@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../utils/app_colors.dart';
+import '../main.dart';
 
 class GameModeSelectionScreen extends StatefulWidget {
   const GameModeSelectionScreen({Key? key}) : super(key: key);
@@ -97,10 +98,23 @@ class _GameModeSelectionScreenState extends State<GameModeSelectionScreen>
                             Icons.logout,
                             color: AppColors.whiteText,
                           ),
-                          onPressed: () {
-                            Navigator.of(
-                              context,
-                            ).pushReplacementNamed('/login');
+                          onPressed: () async {
+                            try {
+                              await nhostClient.auth.signOut();
+                              // Clear stored credentials
+                              await secureStorage.delete(key: 'user_email');
+                              await secureStorage.delete(key: 'user_password');
+                              await secureStorage.delete(
+                                key: 'nhost_access_token',
+                              );
+
+                              if (!mounted) return;
+                              Navigator.of(
+                                context,
+                              ).pushReplacementNamed('/login');
+                            } catch (e) {
+                              print('Logout error: $e');
+                            }
                           },
                           tooltip: 'Logout',
                         ),

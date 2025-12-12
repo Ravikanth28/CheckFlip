@@ -68,10 +68,13 @@ class _LoginPageState extends State<LoginPage>
 
       final accessToken = widget.nhostClient.auth.accessToken;
       if (accessToken != null) {
+        // Save tokens and credentials for session persistence
         await widget.secureStorage.write(
           key: 'nhost_access_token',
           value: accessToken,
         );
+        await widget.secureStorage.write(key: 'user_email', value: email);
+        await widget.secureStorage.write(key: 'user_password', value: password);
       }
 
       if (!mounted) return;

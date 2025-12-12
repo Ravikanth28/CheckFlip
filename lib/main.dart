@@ -33,6 +33,24 @@ Future<void> main() async {
     subdomain: Subdomain(subdomain: subdomain, region: region),
   );
 
+  // Try to auto-login with stored credentials
+  try {
+    final email = await secureStorage.read(key: 'user_email');
+    final password = await secureStorage.read(key: 'user_password');
+
+    if (email != null && password != null) {
+      print('Found stored credentials, attempting auto-login...');
+      await nhostClient.auth.signInEmailPassword(
+        email: email,
+        password: password,
+      );
+      print('Auto-login successful!');
+    }
+  } catch (e) {
+    print('Auto-login failed: $e');
+    // Continue to app, user will need to login manually
+  }
+
   runApp(MyApp(nhostClient: nhostClient));
 }
 
@@ -45,20 +63,6 @@ class MyApp extends StatefulWidget {
 }
 
 class _MyAppState extends State<MyApp> {
-  Widget _getInitialScreen() {
-    // Check if user is already logged in
-    if (widget.nhostClient.auth.currentUser != null) {
-      return HomeScreen(
-        nhostClient: widget.nhostClient,
-        secureStorage: secureStorage,
-      );
-    }
-    return LoginPage(
-      nhostClient: widget.nhostClient,
-      secureStorage: secureStorage,
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     return NhostGraphQLProvider(
@@ -69,7 +73,7 @@ class _MyAppState extends State<MyApp> {
           title: 'Antigravity - Nhost Flutter',
           theme: ThemeData(primarySwatch: Colors.blue, useMaterial3: true),
           debugShowCheckedModeBanner: false,
-          home: _getInitialScreen(),
+          initialRoute: '/home',
           routes: {
             '/login': (context) => LoginPage(
               nhostClient: nhostClient,

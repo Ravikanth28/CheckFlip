@@ -26,6 +26,14 @@ class _HomeScreenState extends State<HomeScreen>
   @override
   void initState() {
     super.initState();
+
+    // Check if user is authenticated, if not redirect to login
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (widget.nhostClient.auth.currentUser == null) {
+        Navigator.of(context).pushReplacementNamed('/login');
+      }
+    });
+
     _controller = AnimationController(
       duration: const Duration(milliseconds: 1500),
       vsync: this,
