@@ -138,24 +138,17 @@ class MovementRules {
     GameBoard board,
   ) {
     List<BoardPosition> moves = [];
-    // Pawns move forward based on color
-    // Red moves up (decreasing row), Black moves down (increasing row)
-    final direction = piece.color == PieceColor.red ? -1 : 1;
+    // BOTH colors move toward each other (toward center)
+    // Red moves DOWN (increasing row), Black moves UP (decreasing row)
+    final direction = piece.color == PieceColor.red ? 1 : -1;
 
-    // Forward move or capture
+    // Forward move (only to empty square)
     final forward = BoardPosition(from.row + direction, from.col);
-    if (forward.isValid(board.size)) {
-      final targetPiece = board.getPiece(forward);
-      if (targetPiece == null) {
-        // Empty - can move
-        moves.add(forward);
-      } else if (targetPiece.color != piece.color) {
-        // Enemy - can capture forward
-        moves.add(forward);
-      }
+    if (forward.isValid(board.size) && board.isEmpty(forward)) {
+      moves.add(forward);
     }
 
-    // Diagonal captures
+    // Diagonal captures ONLY
     final diagonalLeft = BoardPosition(from.row + direction, from.col - 1);
     final diagonalRight = BoardPosition(from.row + direction, from.col + 1);
 
@@ -221,9 +214,10 @@ class MovementRules {
     if (piece.type != PieceType.pawn) return false;
 
     // Check if pawn reaches final row
-    if (piece.color == PieceColor.red && to.row == 0) return true;
-    if (piece.color == PieceColor.black && to.row == board.size - 1)
-      return true;
+    // Red moves DOWN → blocks at last row
+    // Black moves UP → blocks at first row (row 0)
+    if (piece.color == PieceColor.red && to.row == board.size - 1) return true;
+    if (piece.color == PieceColor.black && to.row == 0) return true;
 
     return false;
   }
