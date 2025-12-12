@@ -8,6 +8,9 @@ import '../models/board_position.dart';
 import '../logic/movement_rules.dart';
 import 'package:nhost_dart/nhost_dart.dart';
 import '../main.dart';
+import '../widgets/piece_card.dart';
+import '../widgets/game_dialog.dart';
+import '../utils/app_colors.dart';
 
 class CheckFlipGameScreen extends StatefulWidget {
   final int boardSize;
@@ -372,22 +375,12 @@ class _CheckFlipGameScreenState extends State<CheckFlipGameScreen> {
 
   void _showVictoryDialog() {
     final winner = gameState.currentPlayer == PieceColor.red ? 'Black' : 'Red';
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) => AlertDialog(
-        title: Text('$winner Wins!'),
-        content: const Text('Congratulations!'),
-        actions: [
-          TextButton(
-            onPressed: () {
-              Navigator.of(context).pop();
-              Navigator.of(context).pop();
-            },
-            child: const Text('Back to Menu'),
-          ),
-        ],
-      ),
+    GameDialog.show(
+      context,
+      '$winner Wins!\nCongratulations!',
+      onConfirm: () {
+        Navigator.of(context).pop();
+      },
     );
   }
 
@@ -399,22 +392,20 @@ class _CheckFlipGameScreenState extends State<CheckFlipGameScreen> {
     final bool flipBoard = widget.isOnline && widget.playerColor == 'black';
 
     return Scaffold(
+      backgroundColor: AppColors.darkBackground,
       appBar: AppBar(
         title: Text(
           widget.isOnline
               ? 'CheckFlip Online - ${widget.playerColor?.toUpperCase()}'
               : 'CheckFlip ${widget.boardSize}×${widget.boardSize}',
+          style: const TextStyle(color: AppColors.whiteText),
         ),
-        backgroundColor: Colors.brown.shade800,
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        iconTheme: const IconThemeData(color: AppColors.whiteText),
       ),
       body: Container(
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [Colors.brown.shade700, Colors.brown.shade900],
-          ),
-        ),
+        decoration: const BoxDecoration(gradient: AppColors.backgroundGradient),
         child: Column(
           children: [
             // Top panel (opponent for current player)
@@ -428,12 +419,21 @@ class _CheckFlipGameScreenState extends State<CheckFlipGameScreen> {
                   aspectRatio: 1,
                   child: Container(
                     margin: const EdgeInsets.all(16),
+                    padding: const EdgeInsets.all(12),
                     decoration: BoxDecoration(
+                      color: AppColors.boardDark,
                       border: Border.all(
-                        color: Colors.brown.shade300,
-                        width: 4,
+                        color: AppColors.boardBorder,
+                        width: 3,
                       ),
-                      borderRadius: BorderRadius.circular(8),
+                      borderRadius: BorderRadius.circular(20),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withOpacity(0.5),
+                          blurRadius: 20,
+                          offset: const Offset(0, 10),
+                        ),
+                      ],
                     ),
                     child: _buildBoard(flipBoard),
                   ),
@@ -488,47 +488,13 @@ class _CheckFlipGameScreenState extends State<CheckFlipGameScreen> {
         final isSelected = selectedPosition == pos;
         final isValidMove = validMoves.contains(pos);
 
-        return GestureDetector(
+        return PieceCard(
+          piece: piece,
+          isSelected: isSelected,
+          isValidMove: isValidMove,
+          fromPosition: isValidMove ? selectedPosition : null,
+          toPosition: isValidMove ? pos : null,
           onTap: () => _onSquareTap(pos),
-          child: Container(
-            decoration: BoxDecoration(
-              color: isSelected
-                  ? Colors.yellow.shade200
-                  : isValidMove
-                  ? Colors.green.shade200
-                  : Colors.white,
-              border: Border.all(color: Colors.brown.shade800, width: 1),
-            ),
-            child: piece != null
-                ? Center(
-                    child: piece.isFaceDown
-                        ? Container(
-                            margin: const EdgeInsets.all(4),
-                            decoration: BoxDecoration(
-                              color: piece.color == PieceColor.red
-                                  ? Colors.red
-                                  : Colors.black,
-                              borderRadius: BorderRadius.circular(4),
-                            ),
-                            child: const Center(
-                              child: Icon(
-                                Icons.question_mark,
-                                color: Colors.white,
-                              ),
-                            ),
-                          )
-                        : Text(
-                            piece.symbol,
-                            style: TextStyle(
-                              fontSize: 32,
-                              color: piece.color == PieceColor.red
-                                  ? Colors.red
-                                  : Colors.black,
-                            ),
-                          ),
-                  )
-                : null,
-          ),
         );
       },
     );

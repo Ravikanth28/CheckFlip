@@ -1,322 +1,430 @@
 import 'package:flutter/material.dart';
-import 'package:nhost_dart/nhost_dart.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
+import 'dart:convert';
+import '../main.dart';
+import '../utils/app_colors.dart';
+import 'checkflip_game_screen.dart';
 
 class JoinRoomScreen extends StatefulWidget {
-  final NhostClient nhostClient;
-
-  const JoinRoomScreen({Key? key, required this.nhostClient}) : super(key: key);
+  const JoinRoomScreen({Key? key}) : super(key: key);
 
   @override
   State<JoinRoomScreen> createState() => _JoinRoomScreenState();
 }
 
-class _JoinRoomScreenState extends State<JoinRoomScreen> {
-  final _roomIdController = TextEditingController();
-  bool _connecting = false;
-  bool _connected = false;
-  String? _error;
+class _JoinRoomScreenState extends State<JoinRoomScreen>
+    with SingleTickerProviderStateMixin {
+  final _formKey = GlobalKey<FormState>();
+  final _roomCodeCtrl = TextEditingController();
+  bool _isJoining = false;
+  late AnimationController _controller;
+  late Animation<double> _fadeAnimation;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      duration: const Duration(milliseconds: 800),
+      vsync: this,
+    );
+    _fadeAnimation = Tween<double>(
+      begin: 0.0,
+      end: 1.0,
+    ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeIn));
+    _controller.forward();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    _roomCodeCtrl.dispose();
+    super.dispose();
+  }
 
   Future<void> _joinRoom() async {
-    final roomId = _roomIdController.text.trim().toUpperCase();
+    if (!_formKey.currentState!.validate()) return;
 
-    if (roomId.isEmpty) {
-      setState(() => _error = 'Please enter a room ID');
-      return;
-    }
-
-    if (roomId.length != 8) {
-      setState(() => _error = 'Room ID must be 8 characters');
-      return;
-    }
-
-    setState(() {
-      _connecting = true;
-      _error = null;
-    });
+    setState(() => _isJoining = true);
 
     try {
-      final userId = widget.nhostClient.auth.currentUser?.id;
-      if (userId == null) {
-        setState(() {
-          _error = 'Not authenticated';
-          _connecting = false;
-        });
-        return;
-      }
+      final roomId = _roomCodeCtrl.text.trim();
+      final accessToken = nhostClient.auth.accessToken;
 
-      final accessToken = widget.nhostClient.auth.accessToken;
       if (accessToken == null) {
-        setState(() {
-          _error = 'No access token';
-          _connecting = false;
-        });
-        return;
+        throw Exception('Not authenticated');
       }
 
-      const joinRoomMutation = r'''
-        mutation JoinRoom($roomId: String!, $opponentId: uuid!) {
-          update_rooms(
-            where: {room_id: {_eq: $roomId}, status: {_eq: "waiting"}},
-            _set: {opponent_id: $opponentId, status: "connected"}
-          ) {
-            affected_rows
-            returning {
-              id
-              room_id
-              status
-            }
+      // Check if room exists
+      final query = '''
+        query GetRoom(\$roomId: String!) {
+          rooms(where: {room_id: {_eq: \$roomId}}) {
+            id
+            room_id
+            status
           }
         }
       ''';
 
       final response = await http.post(
-        Uri.parse(widget.nhostClient.gqlEndpointUrl),
+        Uri.parse(nhostClient.gqlEndpointUrl),
         headers: {
           'Content-Type': 'application/json',
           'Authorization': 'Bearer $accessToken',
         },
         body: json.encode({
-          'query': joinRoomMutation,
-          'variables': {'roomId': roomId, 'opponentId': userId},
+          'query': query,
+          'variables': {'roomId': roomId},
         }),
       );
+
+      print('Join room response: ${response.body}');
 
       final data = json.decode(response.body);
 
       if (data['errors'] != null) {
-        setState(() {
-          _error = 'Failed to join room: ${data['errors'][0]['message']}';
-          _connecting = false;
-        });
-        return;
+        throw Exception('GraphQL Error: ${data['errors'][0]['message']}');
       }
 
-      final affectedRows =
-          data['data']?['update_rooms']?['affected_rows'] as int? ?? 0;
+      final rooms = data['data']?['rooms'] as List?;
 
-      if (affectedRows == 0) {
-        setState(() {
-          _error = 'Room not found or already full';
-          _connecting = false;
-        });
-        return;
+      if (rooms == null || rooms.isEmpty) {
+        throw Exception('Room not found. Please check the code and try again.');
       }
 
-      setState(() {
-        _connecting = false;
-        _connected = true;
-      });
+      // Update room status to active when joining
+      await _updateRoomStatus(roomId, accessToken);
 
-      // Auto-navigate to game after 1 second
-      Future.delayed(const Duration(seconds: 1), () {
-        if (mounted) {
-          // Joiner is ALWAYS BLACK
-          Navigator.of(context).pushReplacementNamed(
-            '/game',
-            arguments: {
-              'boardSize': 4,
-              'roomId': roomId,
-              'playerColor': 'black', // Joiner is always BLACK
-              'isOnline': true,
-            },
-          );
-        }
-      });
+      if (!mounted) return;
+      Navigator.of(context).pushReplacement(
+        MaterialPageRoute(
+          builder: (context) => CheckFlipGameScreen(
+            boardSize: 4,
+            roomId: roomId,
+            playerColor: 'black',
+            isOnline: true,
+          ),
+        ),
+      );
     } catch (e) {
-      setState(() {
-        _error = 'Error: $e';
-        _connecting = false;
-      });
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error: ${e.toString()}'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _isJoining = false);
+      }
     }
   }
 
-  @override
-  void dispose() {
-    _roomIdController.dispose();
-    super.dispose();
+  Future<void> _updateRoomStatus(String roomId, String accessToken) async {
+    try {
+      final mutation = '''
+        mutation UpdateRoomStatus(\$roomId: String!) {
+          update_rooms(
+            where: {room_id: {_eq: \$roomId}},
+            _set: {status: "active"}
+          ) {
+            affected_rows
+          }
+        }
+      ''';
+
+      await http.post(
+        Uri.parse(nhostClient.gqlEndpointUrl),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $accessToken',
+        },
+        body: json.encode({
+          'query': mutation,
+          'variables': {'roomId': roomId},
+        }),
+      );
+    } catch (e) {
+      print('Failed to update room status: $e');
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Join Room'),
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back),
-          onPressed: () => Navigator.of(context).pop(),
-        ),
-      ),
       body: Container(
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [Colors.purple.shade100, Colors.purple.shade50],
-          ),
-        ),
-        child: Center(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(
-                  _connected ? Icons.check_circle : Icons.login,
-                  size: 100,
-                  color: _connected ? Colors.green : Colors.purple.shade700,
+        decoration: const BoxDecoration(gradient: AppColors.backgroundGradient),
+        child: Stack(
+          children: [
+            // Background decorations
+            Positioned(
+              top: -50,
+              left: -80,
+              child: Opacity(
+                opacity: 0.05,
+                child: Icon(Icons.login, size: 300, color: AppColors.whiteText),
+              ),
+            ),
+            Positioned(
+              bottom: -60,
+              right: -70,
+              child: Opacity(
+                opacity: 0.05,
+                child: Text(
+                  '♞',
+                  style: TextStyle(fontSize: 280, color: AppColors.whiteText),
                 ),
-                const SizedBox(height: 32),
-                Text(
-                  _connected ? 'Connected!' : 'Join Room',
-                  style: const TextStyle(
-                    fontSize: 32,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                const SizedBox(height: 16),
-                Text(
-                  _connected
-                      ? 'Successfully joined the room'
-                      : 'Enter the room ID shared by your friend',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(fontSize: 16, color: Colors.grey[700]),
-                ),
-                const SizedBox(height: 40),
-                if (!_connected) ...[
-                  Container(
-                    constraints: const BoxConstraints(maxWidth: 400),
-                    padding: const EdgeInsets.all(24),
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(16),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withOpacity(0.1),
-                          blurRadius: 10,
-                          spreadRadius: 2,
-                        ),
-                      ],
-                    ),
-                    child: Column(
+              ),
+            ),
+
+            // Main content
+            SafeArea(
+              child: Column(
+                children: [
+                  // Header
+                  Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Row(
                       children: [
-                        TextField(
-                          controller: _roomIdController,
-                          decoration: InputDecoration(
-                            labelText: 'Room ID',
-                            hintText: 'Enter 8-character code',
-                            prefixIcon: const Icon(Icons.vpn_key),
-                            border: const OutlineInputBorder(),
-                            errorText: _error,
+                        IconButton(
+                          icon: const Icon(
+                            Icons.arrow_back,
+                            color: AppColors.whiteText,
                           ),
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(
-                            fontSize: 24,
-                            letterSpacing: 4,
-                            fontFamily: 'monospace',
-                          ),
-                          textCapitalization: TextCapitalization.characters,
-                          maxLength: 8,
-                          onChanged: (value) {
-                            if (_error != null) {
-                              setState(() => _error = null);
-                            }
-                          },
+                          onPressed: () => Navigator.pop(context),
                         ),
-                        const SizedBox(height: 24),
-                        SizedBox(
-                          width: double.infinity,
-                          height: 50,
-                          child: ElevatedButton.icon(
-                            onPressed: _connecting ? null : _joinRoom,
-                            icon: _connecting
-                                ? const SizedBox(
-                                    width: 20,
-                                    height: 20,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                      color: Colors.white,
-                                    ),
-                                  )
-                                : const Icon(Icons.login),
-                            label: Text(
-                              _connecting ? 'Connecting...' : 'Join Room',
-                            ),
-                            style: ElevatedButton.styleFrom(
-                              textStyle: const TextStyle(fontSize: 18),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ] else ...[
-                  Container(
-                    padding: const EdgeInsets.all(24),
-                    decoration: BoxDecoration(
-                      color: Colors.green.shade50,
-                      borderRadius: BorderRadius.circular(16),
-                      border: Border.all(
-                        color: Colors.green.shade300,
-                        width: 2,
-                      ),
-                    ),
-                    child: Column(
-                      children: [
-                        Icon(
-                          Icons.check_circle,
-                          size: 80,
-                          color: Colors.green.shade700,
-                        ),
-                        const SizedBox(height: 16),
-                        Text(
-                          'Successfully Connected!',
+                        const SizedBox(width: 8),
+                        const Text(
+                          'Join Room',
                           style: TextStyle(
                             fontSize: 24,
                             fontWeight: FontWeight.bold,
-                            color: Colors.green.shade900,
-                          ),
-                        ),
-                        const SizedBox(height: 8),
-                        Text(
-                          'Room ID: ${_roomIdController.text.toUpperCase()}',
-                          style: TextStyle(
-                            fontSize: 16,
-                            color: Colors.green.shade700,
-                            fontFamily: 'monospace',
-                          ),
-                        ),
-                        const SizedBox(height: 24),
-                        ElevatedButton.icon(
-                          onPressed: () {
-                            Navigator.of(context).pushNamed(
-                              '/game',
-                              arguments: {
-                                'boardSize': 4,
-                                'roomId': _roomIdController.text.toUpperCase(),
-                                'playerColor': 'black', // Opponent is Black
-                                'isOnline': true,
-                              },
-                            );
-                          },
-                          icon: const Icon(Icons.play_arrow),
-                          label: const Text('Start Game'),
-                          style: ElevatedButton.styleFrom(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 32,
-                              vertical: 16,
-                            ),
-                            textStyle: const TextStyle(fontSize: 18),
+                            color: AppColors.whiteText,
                           ),
                         ),
                       ],
                     ),
                   ),
+
+                  // Content
+                  Expanded(
+                    child: Center(
+                      child: SingleChildScrollView(
+                        padding: const EdgeInsets.all(24),
+                        child: FadeTransition(
+                          opacity: _fadeAnimation,
+                          child: Form(
+                            key: _formKey,
+                            child: Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                // Icon with gradient
+                                Container(
+                                  padding: const EdgeInsets.all(30),
+                                  decoration: BoxDecoration(
+                                    shape: BoxShape.circle,
+                                    gradient: const LinearGradient(
+                                      colors: [
+                                        Color(0xFF9C27B0),
+                                        Color(0xFFE91E63),
+                                      ],
+                                    ),
+                                    boxShadow: [
+                                      BoxShadow(
+                                        color: const Color(
+                                          0xFF9C27B0,
+                                        ).withOpacity(0.5),
+                                        blurRadius: 30,
+                                        spreadRadius: 5,
+                                      ),
+                                    ],
+                                  ),
+                                  child: const Icon(
+                                    Icons.login,
+                                    size: 80,
+                                    color: Colors.white,
+                                  ),
+                                ),
+                                const SizedBox(height: 40),
+
+                                // Title
+                                const Text(
+                                  'Join a Room',
+                                  style: TextStyle(
+                                    fontSize: 32,
+                                    fontWeight: FontWeight.bold,
+                                    color: AppColors.whiteText,
+                                  ),
+                                ),
+                                const SizedBox(height: 8),
+                                Text(
+                                  'Enter the room code to join',
+                                  style: TextStyle(
+                                    fontSize: 16,
+                                    color: AppColors.whiteText.withOpacity(0.7),
+                                  ),
+                                ),
+                                const SizedBox(height: 50),
+
+                                // Room Code Input
+                                Container(
+                                  constraints: const BoxConstraints(
+                                    maxWidth: 400,
+                                  ),
+                                  child: TextFormField(
+                                    controller: _roomCodeCtrl,
+                                    style: const TextStyle(
+                                      color: AppColors.whiteText,
+                                      fontSize: 18,
+                                      letterSpacing: 2,
+                                    ),
+                                    textAlign: TextAlign.center,
+                                    textCapitalization:
+                                        TextCapitalization.characters,
+                                    decoration: InputDecoration(
+                                      labelText: 'Room Code',
+                                      labelStyle: TextStyle(
+                                        color: AppColors.whiteText.withOpacity(
+                                          0.7,
+                                        ),
+                                      ),
+                                      hintText: 'XXXX-XXXX',
+                                      hintStyle: TextStyle(
+                                        color: AppColors.whiteText.withOpacity(
+                                          0.3,
+                                        ),
+                                      ),
+                                      filled: true,
+                                      fillColor: Colors.white.withOpacity(0.1),
+                                      border: OutlineInputBorder(
+                                        borderRadius: BorderRadius.circular(12),
+                                        borderSide: BorderSide.none,
+                                      ),
+                                      enabledBorder: OutlineInputBorder(
+                                        borderRadius: BorderRadius.circular(12),
+                                        borderSide: BorderSide(
+                                          color: AppColors.whiteText
+                                              .withOpacity(0.2),
+                                        ),
+                                      ),
+                                      focusedBorder: OutlineInputBorder(
+                                        borderRadius: BorderRadius.circular(12),
+                                        borderSide: const BorderSide(
+                                          color: Color(0xFF9C27B0),
+                                          width: 2,
+                                        ),
+                                      ),
+                                      prefixIcon: Icon(
+                                        Icons.vpn_key,
+                                        color: AppColors.whiteText.withOpacity(
+                                          0.7,
+                                        ),
+                                      ),
+                                    ),
+                                    validator: (val) {
+                                      if (val == null || val.trim().isEmpty) {
+                                        return 'Room code is required';
+                                      }
+                                      return null;
+                                    },
+                                  ),
+                                ),
+                                const SizedBox(height: 40),
+
+                                // Join Button
+                                Container(
+                                  constraints: const BoxConstraints(
+                                    maxWidth: 400,
+                                  ),
+                                  width: double.infinity,
+                                  child: ElevatedButton(
+                                    onPressed: _isJoining ? null : _joinRoom,
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: const Color(0xFF9C27B0),
+                                      padding: const EdgeInsets.symmetric(
+                                        vertical: 18,
+                                      ),
+                                      shape: RoundedRectangleBorder(
+                                        borderRadius: BorderRadius.circular(12),
+                                      ),
+                                      elevation: 8,
+                                      shadowColor: const Color(
+                                        0xFF9C27B0,
+                                      ).withOpacity(0.5),
+                                    ),
+                                    child: _isJoining
+                                        ? const SizedBox(
+                                            height: 20,
+                                            width: 20,
+                                            child: CircularProgressIndicator(
+                                              strokeWidth: 2,
+                                              valueColor:
+                                                  AlwaysStoppedAnimation<Color>(
+                                                    Colors.white,
+                                                  ),
+                                            ),
+                                          )
+                                        : const Text(
+                                            'JOIN ROOM',
+                                            style: TextStyle(
+                                              fontSize: 18,
+                                              fontWeight: FontWeight.bold,
+                                              color: Colors.white,
+                                              letterSpacing: 2,
+                                            ),
+                                          ),
+                                  ),
+                                ),
+                                const SizedBox(height: 20),
+
+                                // Info text
+                                Container(
+                                  constraints: const BoxConstraints(
+                                    maxWidth: 400,
+                                  ),
+                                  padding: const EdgeInsets.all(16),
+                                  decoration: BoxDecoration(
+                                    color: Colors.white.withOpacity(0.05),
+                                    borderRadius: BorderRadius.circular(12),
+                                    border: Border.all(
+                                      color: Colors.white.withOpacity(0.1),
+                                    ),
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      Icon(
+                                        Icons.info_outline,
+                                        color: AppColors.whiteText.withOpacity(
+                                          0.7,
+                                        ),
+                                        size: 20,
+                                      ),
+                                      const SizedBox(width: 12),
+                                      Expanded(
+                                        child: Text(
+                                          'You will play as Black. Ask your friend for the room code.',
+                                          style: TextStyle(
+                                            fontSize: 14,
+                                            color: AppColors.whiteText
+                                                .withOpacity(0.7),
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
                 ],
-              ],
+              ),
             ),
-          ),
+          ],
         ),
       ),
     );

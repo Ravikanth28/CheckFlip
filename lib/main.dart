@@ -1,11 +1,9 @@
-import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:nhost_dart/nhost_dart.dart';
 import 'package:nhost_flutter_auth/nhost_flutter_auth.dart';
 import 'package:nhost_flutter_graphql/nhost_flutter_graphql.dart';
-import 'package:graphql_flutter/graphql_flutter.dart';
-import 'package:http/http.dart' as http;
+
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import 'screens/login_page.dart';
@@ -38,20 +36,40 @@ Future<void> main() async {
   runApp(MyApp(nhostClient: nhostClient));
 }
 
-class MyApp extends StatelessWidget {
+class MyApp extends StatefulWidget {
   final NhostClient nhostClient;
   const MyApp({Key? key, required this.nhostClient}) : super(key: key);
 
   @override
+  State<MyApp> createState() => _MyAppState();
+}
+
+class _MyAppState extends State<MyApp> {
+  Widget _getInitialScreen() {
+    // Check if user is already logged in
+    if (widget.nhostClient.auth.currentUser != null) {
+      return HomeScreen(
+        nhostClient: widget.nhostClient,
+        secureStorage: secureStorage,
+      );
+    }
+    return LoginPage(
+      nhostClient: widget.nhostClient,
+      secureStorage: secureStorage,
+    );
+  }
+
+  @override
   Widget build(BuildContext context) {
     return NhostGraphQLProvider(
-      nhostClient: nhostClient,
+      nhostClient: widget.nhostClient,
       child: NhostAuthProvider(
-        auth: nhostClient.auth,
+        auth: widget.nhostClient.auth,
         child: MaterialApp(
           title: 'Antigravity - Nhost Flutter',
           theme: ThemeData(primarySwatch: Colors.blue, useMaterial3: true),
-          initialRoute: '/login',
+          debugShowCheckedModeBanner: false,
+          home: _getInitialScreen(),
           routes: {
             '/login': (context) => LoginPage(
               nhostClient: nhostClient,
@@ -85,26 +103,17 @@ class MyApp extends StatelessWidget {
             }
             if (settings.name == '/room-game') {
               return MaterialPageRoute(
-                builder: (context) =>
-                    RoomSelectionScreen(nhostClient: nhostClient),
+                builder: (context) => const RoomSelectionScreen(),
               );
             }
             if (settings.name == '/create-room') {
-              final args = settings.arguments as Map<String, dynamic>?;
               return MaterialPageRoute(
-                builder: (context) => CreateRoomScreen(
-                  nhostClient:
-                      args?['nhostClient'] as NhostClient? ?? nhostClient,
-                ),
+                builder: (context) => const CreateRoomScreen(),
               );
             }
             if (settings.name == '/join-room') {
-              final args = settings.arguments as Map<String, dynamic>?;
               return MaterialPageRoute(
-                builder: (context) => JoinRoomScreen(
-                  nhostClient:
-                      args?['nhostClient'] as NhostClient? ?? nhostClient,
-                ),
+                builder: (context) => const JoinRoomScreen(),
               );
             }
             return null;

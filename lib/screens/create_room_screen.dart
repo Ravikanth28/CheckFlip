@@ -1,371 +1,410 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:uuid/uuid.dart';
-import 'package:nhost_dart/nhost_dart.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
+import 'package:uuid/uuid.dart';
+import '../main.dart';
+import '../utils/app_colors.dart';
+import 'checkflip_game_screen.dart';
 
 class CreateRoomScreen extends StatefulWidget {
-  final NhostClient nhostClient;
-
-  const CreateRoomScreen({Key? key, required this.nhostClient})
-    : super(key: key);
+  const CreateRoomScreen({Key? key}) : super(key: key);
 
   @override
   State<CreateRoomScreen> createState() => _CreateRoomScreenState();
 }
 
-class _CreateRoomScreenState extends State<CreateRoomScreen> {
-  late String roomId;
-  bool _copied = false;
-  bool _connected = false;
-  String? _error;
+class _CreateRoomScreenState extends State<CreateRoomScreen>
+    with SingleTickerProviderStateMixin {
+  late String roomCode;
   bool _isCreating = true;
+  bool _opponentJoined = false;
+  String? _error;
+  late AnimationController _pulseController;
+  late Animation<double> _pulseAnimation;
 
   @override
   void initState() {
     super.initState();
-    roomId = const Uuid().v4().substring(0, 8).toUpperCase();
-    // Delay to ensure widget is built
-    Future.delayed(Duration.zero, () => _createRoom());
+    roomCode = const Uuid().v4().substring(0, 8).toUpperCase();
+
+    _pulseController = AnimationController(
+      duration: const Duration(milliseconds: 1500),
+      vsync: this,
+    )..repeat(reverse: true);
+
+    _pulseAnimation = Tween<double>(begin: 0.95, end: 1.05).animate(
+      CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
+    );
+
+    _createRoom();
+  }
+
+  @override
+  void dispose() {
+    _pulseController.dispose();
+    super.dispose();
   }
 
   Future<void> _createRoom() async {
     try {
-      final userId = widget.nhostClient.auth.currentUser?.id;
-      if (userId == null) {
-        setState(() {
-          _error = 'Not authenticated';
-          _isCreating = false;
-        });
-        return;
+      // Check if user is authenticated
+      if (nhostClient.auth.currentUser == null) {
+        throw Exception('Not authenticated. Please log in again.');
       }
 
-      final accessToken = widget.nhostClient.auth.accessToken;
-      if (accessToken == null) {
-        setState(() {
-          _error = 'No access token';
-          _isCreating = false;
-        });
-        return;
+      final accessToken = nhostClient.auth.accessToken;
+      if (accessToken == null || accessToken.isEmpty) {
+        throw Exception('No access token. Please log in again.');
       }
 
-      const createRoomMutation = r'''
-        mutation CreateRoom($roomId: String!, $creatorId: uuid!) {
+      print('Creating room with token: ${accessToken.substring(0, 20)}...');
+
+      final mutation = '''
+        mutation CreateRoom(\$roomId: String!) {
           insert_rooms_one(object: {
-            room_id: $roomId,
-            creator_id: $creatorId,
+            room_id: \$roomId,
             status: "waiting"
           }) {
             id
             room_id
+          }
+        }
+      ''';
+
+      final response = await http.post(
+        Uri.parse(nhostClient.gqlEndpointUrl),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $accessToken',
+        },
+        body: json.encode({
+          'query': mutation,
+          'variables': {'roomId': roomCode},
+        }),
+      );
+
+      print('Create room response: ${response.body}');
+
+      final responseData = json.decode(response.body);
+
+      if (responseData['errors'] != null) {
+        throw Exception('GraphQL Error: ${responseData['errors']}');
+      }
+
+      if (response.statusCode == 200 && responseData['data'] != null) {
+        setState(() => _isCreating = false);
+        _listenForOpponent();
+      } else {
+        throw Exception('Failed to create room: ${response.body}');
+      }
+    } catch (e) {
+      setState(() {
+        _error = e.toString();
+        _isCreating = false;
+      });
+    }
+  }
+
+  void _listenForOpponent() {
+    // Poll for opponent joining (in a real app, use subscriptions)
+    Future.delayed(const Duration(seconds: 2), () {
+      if (mounted) {
+        _checkOpponentJoined();
+      }
+    });
+  }
+
+  Future<void> _checkOpponentJoined() async {
+    try {
+      final accessToken = nhostClient.auth.accessToken;
+      if (accessToken == null) return;
+
+      final query = '''
+        query CheckRoom(\$roomId: String!) {
+          rooms(where: {room_id: {_eq: \$roomId}}) {
             status
           }
         }
       ''';
 
       final response = await http.post(
-        Uri.parse(widget.nhostClient.gqlEndpointUrl),
+        Uri.parse(nhostClient.gqlEndpointUrl),
         headers: {
           'Content-Type': 'application/json',
           'Authorization': 'Bearer $accessToken',
         },
         body: json.encode({
-          'query': createRoomMutation,
-          'variables': {'roomId': roomId, 'creatorId': userId},
+          'query': query,
+          'variables': {'roomId': roomCode},
         }),
       );
 
       final data = json.decode(response.body);
+      final rooms = data['data']?['rooms'] as List?;
 
-      if (data['errors'] != null) {
-        setState(() {
-          _error = 'Failed to create room: ${data['errors'][0]['message']}';
-          _isCreating = false;
-        });
-        return;
+      if (rooms != null && rooms.isNotEmpty) {
+        final status = rooms[0]['status'];
+        if (status == 'active') {
+          setState(() => _opponentJoined = true);
+          _startGame();
+        } else {
+          // Continue polling
+          _listenForOpponent();
+        }
       }
-
-      setState(() => _isCreating = false);
-
-      // Start polling for opponent (simplified - no subscription for now)
-      _pollForOpponent();
     } catch (e) {
-      setState(() {
-        _error = 'Error: $e';
-        _isCreating = false;
-      });
+      // Continue polling even on error
+      _listenForOpponent();
     }
   }
 
-  void _pollForOpponent() {
-    // Poll every 2 seconds to check if opponent joined
-    Future.delayed(const Duration(seconds: 2), () async {
-      if (!mounted || _connected) return;
-
-      try {
-        final accessToken = widget.nhostClient.auth.accessToken;
-        if (accessToken == null) return;
-
-        const query = r'''
-          query GetRoom($roomId: String!) {
-            rooms(where: {room_id: {_eq: $roomId}}) {
-              status
-              opponent_id
-            }
-          }
-        ''';
-
-        final response = await http.post(
-          Uri.parse(widget.nhostClient.gqlEndpointUrl),
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': 'Bearer $accessToken',
-          },
-          body: json.encode({
-            'query': query,
-            'variables': {'roomId': roomId},
-          }),
-        );
-
-        final data = json.decode(response.body);
-        final rooms = data['data']?['rooms'] as List?;
-
-        if (rooms != null && rooms.isNotEmpty) {
-          final status = rooms[0]['status'] as String?;
-          if (status == 'connected' && !_connected) {
-            setState(() => _connected = true);
-
-            // Auto-navigate to game after 1 second
-            Future.delayed(const Duration(seconds: 1), () {
-              if (mounted) {
-                // Creator is ALWAYS RED
-                Navigator.of(context).pushReplacementNamed(
-                  '/game',
-                  arguments: {
-                    'boardSize': 4,
-                    'roomId': roomId,
-                    'playerColor': 'red', // Creator is always RED
-                    'isOnline': true,
-                  },
-                );
-              }
-            });
-            return;
-          }
-        }
-
-        // Continue polling
-        _pollForOpponent();
-      } catch (e) {
-        // Continue polling even on error
-        _pollForOpponent();
-      }
-    });
-  }
-
-  void _copyRoomId() {
-    Clipboard.setData(ClipboardData(text: roomId));
-    setState(() => _copied = true);
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Room ID copied to clipboard!'),
-        duration: Duration(seconds: 2),
+  void _startGame() {
+    Navigator.of(context).pushReplacement(
+      MaterialPageRoute(
+        builder: (context) => CheckFlipGameScreen(
+          boardSize: 4,
+          roomId: roomCode,
+          playerColor: 'red',
+          isOnline: true,
+        ),
       ),
     );
-    Future.delayed(const Duration(seconds: 2), () {
-      if (mounted) {
-        setState(() => _copied = false);
-      }
-    });
+  }
+
+  void _copyRoomCode() {
+    Clipboard.setData(ClipboardData(text: roomCode));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: const Text('Room code copied!'),
+        backgroundColor: AppColors.redAccent,
+        duration: const Duration(seconds: 2),
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Create Room'),
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back),
-          onPressed: () => Navigator.of(context).pop(),
-        ),
-      ),
       body: Container(
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [Colors.blue.shade100, Colors.blue.shade50],
-          ),
-        ),
-        child: Center(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                if (_error != null) ...[
-                  Container(
-                    padding: const EdgeInsets.all(16),
-                    decoration: BoxDecoration(
-                      color: Colors.red.shade50,
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: Colors.red.shade300),
+        decoration: const BoxDecoration(gradient: AppColors.backgroundGradient),
+        child: SafeArea(
+          child: Column(
+            children: [
+              // Header
+              Padding(
+                padding: const EdgeInsets.all(16),
+                child: Row(
+                  children: [
+                    IconButton(
+                      icon: const Icon(
+                        Icons.arrow_back,
+                        color: AppColors.whiteText,
+                      ),
+                      onPressed: () => Navigator.pop(context),
                     ),
-                    child: Text(
-                      _error!,
-                      style: TextStyle(color: Colors.red.shade900),
+                    const SizedBox(width: 8),
+                    const Text(
+                      'Create Room',
+                      style: TextStyle(
+                        fontSize: 24,
+                        fontWeight: FontWeight.bold,
+                        color: AppColors.whiteText,
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 20),
-                ],
-                Icon(
-                  _connected ? Icons.check_circle : Icons.add_circle_outline,
-                  size: 100,
-                  color: _connected ? Colors.green : Colors.blue.shade700,
+                  ],
                 ),
-                const SizedBox(height: 32),
-                Text(
-                  _connected ? 'Room Created!' : 'Creating Room...',
-                  style: const TextStyle(
-                    fontSize: 28,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                const SizedBox(height: 16),
-                Text(
-                  _connected
-                      ? 'Share this Room ID with your friend'
-                      : 'Setting up your game room',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(fontSize: 16, color: Colors.grey[700]),
-                ),
-                const SizedBox(height: 40),
-                Container(
-                  padding: const EdgeInsets.all(24),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(16),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withOpacity(0.1),
-                        blurRadius: 10,
-                        spreadRadius: 2,
-                      ),
-                    ],
-                  ),
-                  child: Column(
-                    children: [
-                      const Text(
-                        'Room ID',
-                        style: TextStyle(fontSize: 16, color: Colors.grey),
-                      ),
-                      const SizedBox(height: 12),
-                      Text(
-                        roomId,
-                        style: const TextStyle(
-                          fontSize: 36,
-                          fontWeight: FontWeight.bold,
-                          letterSpacing: 4,
-                          fontFamily: 'monospace',
-                        ),
-                      ),
-                      const SizedBox(height: 20),
-                      ElevatedButton.icon(
-                        onPressed: _copyRoomId,
-                        icon: Icon(_copied ? Icons.check : Icons.copy),
-                        label: Text(_copied ? 'Copied!' : 'Copy Room ID'),
-                        style: ElevatedButton.styleFrom(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 24,
-                            vertical: 12,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 40),
-                if (!_connected)
-                  Container(
-                    padding: const EdgeInsets.all(20),
-                    decoration: BoxDecoration(
-                      color: Colors.orange.shade50,
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: Colors.orange.shade200),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
+              ),
+
+              // Content
+              Expanded(
+                child: Center(
+                  child: SingleChildScrollView(
+                    padding: const EdgeInsets.all(24),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        const CircularProgressIndicator(),
-                        const SizedBox(width: 16),
-                        Text(
-                          'Waiting for opponent...',
-                          style: TextStyle(
-                            fontSize: 16,
-                            color: Colors.orange.shade900,
+                        if (_isCreating) ...[
+                          const CircularProgressIndicator(
+                            valueColor: AlwaysStoppedAnimation<Color>(
+                              AppColors.redAccent,
+                            ),
                           ),
-                        ),
+                          const SizedBox(height: 20),
+                          const Text(
+                            'Creating room...',
+                            style: TextStyle(
+                              fontSize: 18,
+                              color: AppColors.whiteText,
+                            ),
+                          ),
+                        ] else if (_error != null) ...[
+                          Icon(
+                            Icons.error_outline,
+                            size: 80,
+                            color: Colors.red.shade300,
+                          ),
+                          const SizedBox(height: 20),
+                          Text(
+                            'Error: $_error',
+                            style: const TextStyle(
+                              fontSize: 16,
+                              color: Colors.redAccent,
+                            ),
+                            textAlign: TextAlign.center,
+                          ),
+                        ] else ...[
+                          // Pulsing icon
+                          ScaleTransition(
+                            scale: _pulseAnimation,
+                            child: Container(
+                              padding: const EdgeInsets.all(30),
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                gradient: const LinearGradient(
+                                  colors: [
+                                    Color(0xFF2196F3),
+                                    Color(0xFF00BCD4),
+                                  ],
+                                ),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: const Color(
+                                      0xFF2196F3,
+                                    ).withOpacity(0.5),
+                                    blurRadius: 30,
+                                    spreadRadius: 5,
+                                  ),
+                                ],
+                              ),
+                              child: const Icon(
+                                Icons.hourglass_empty,
+                                size: 80,
+                                color: Colors.white,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 40),
+
+                          // Title
+                          const Text(
+                            'Waiting for Opponent',
+                            style: TextStyle(
+                              fontSize: 28,
+                              fontWeight: FontWeight.bold,
+                              color: AppColors.whiteText,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            'Share this code with your friend',
+                            style: TextStyle(
+                              fontSize: 16,
+                              color: AppColors.whiteText.withOpacity(0.7),
+                            ),
+                          ),
+                          const SizedBox(height: 50),
+
+                          // Room Code Display
+                          Container(
+                            constraints: const BoxConstraints(maxWidth: 400),
+                            padding: const EdgeInsets.all(24),
+                            decoration: BoxDecoration(
+                              color: Colors.white.withOpacity(0.1),
+                              borderRadius: BorderRadius.circular(20),
+                              border: Border.all(
+                                color: AppColors.redAccent,
+                                width: 2,
+                              ),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: AppColors.redAccent.withOpacity(0.3),
+                                  blurRadius: 20,
+                                  spreadRadius: 2,
+                                ),
+                              ],
+                            ),
+                            child: Column(
+                              children: [
+                                const Text(
+                                  'ROOM CODE',
+                                  style: TextStyle(
+                                    fontSize: 14,
+                                    color: AppColors.whiteText,
+                                    letterSpacing: 2,
+                                  ),
+                                ),
+                                const SizedBox(height: 12),
+                                Text(
+                                  roomCode,
+                                  style: const TextStyle(
+                                    fontSize: 36,
+                                    fontWeight: FontWeight.bold,
+                                    color: AppColors.whiteText,
+                                    letterSpacing: 8,
+                                  ),
+                                ),
+                                const SizedBox(height: 20),
+                                ElevatedButton.icon(
+                                  onPressed: _copyRoomCode,
+                                  icon: const Icon(Icons.copy, size: 20),
+                                  label: const Text('COPY CODE'),
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: AppColors.redAccent,
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 24,
+                                      vertical: 12,
+                                    ),
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(10),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(height: 40),
+
+                          // Info box
+                          Container(
+                            constraints: const BoxConstraints(maxWidth: 400),
+                            padding: const EdgeInsets.all(16),
+                            decoration: BoxDecoration(
+                              color: Colors.white.withOpacity(0.05),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(
+                                color: Colors.white.withOpacity(0.1),
+                              ),
+                            ),
+                            child: Row(
+                              children: [
+                                Icon(
+                                  Icons.info_outline,
+                                  color: AppColors.whiteText.withOpacity(0.7),
+                                  size: 20,
+                                ),
+                                const SizedBox(width: 12),
+                                Expanded(
+                                  child: Text(
+                                    'You will play as Red. Game starts when opponent joins.',
+                                    style: TextStyle(
+                                      fontSize: 14,
+                                      color: AppColors.whiteText.withOpacity(
+                                        0.7,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
                       ],
                     ),
-                  )
-                else ...[
-                  Container(
-                    padding: const EdgeInsets.all(20),
-                    decoration: BoxDecoration(
-                      color: Colors.green.shade50,
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(
-                        color: Colors.green.shade300,
-                        width: 2,
-                      ),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          Icons.check_circle,
-                          color: Colors.green.shade700,
-                          size: 28,
-                        ),
-                        const SizedBox(width: 12),
-                        Text(
-                          'Successfully Connected!',
-                          style: TextStyle(
-                            fontSize: 18,
-                            fontWeight: FontWeight.bold,
-                            color: Colors.green.shade900,
-                          ),
-                        ),
-                      ],
-                    ),
                   ),
-                  const SizedBox(height: 24),
-                  ElevatedButton.icon(
-                    onPressed: () {
-                      Navigator.of(context).pushNamed(
-                        '/game',
-                        arguments: {
-                          'boardSize': 4,
-                          'roomId': roomId,
-                          'playerColor': 'red', // Creator is Red
-                          'isOnline': true,
-                        },
-                      );
-                    },
-                    icon: const Icon(Icons.play_arrow),
-                    label: const Text('Start Game'),
-                    style: ElevatedButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 32,
-                        vertical: 16,
-                      ),
-                      textStyle: const TextStyle(fontSize: 18),
-                    ),
-                  ),
-                ],
-              ],
-            ),
+                ),
+              ),
+            ],
           ),
         ),
       ),
